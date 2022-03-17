@@ -92,6 +92,7 @@ class CAT(object):
             self.config = cdb.config
         else:
             # Take the new config and assign it to the CDB also
+
             self.config = config
             self.cdb.config = config
         self._meta_cats = meta_cats
@@ -156,6 +157,7 @@ class CAT(object):
                 'Basic CDB Stats': self.config.version['cdb_info'],
                 'Performance': self.config.version['performance'],
                 'Important Parameters (Partial view, all available in cat.config)': get_important_config_parameters(self.config),
+                'MedCAT Version': self.config.version['medcat_version']
                 }
 
         if as_dict:
@@ -258,9 +260,9 @@ class CAT(object):
 
         model_pack_path = os.path.join(base_dir, foldername)
         if os.path.exists(model_pack_path):
-            print("Found an existing unziped model pack at: {}, the provided zip will not be touched.".format(model_pack_path))
+            cls.log.info("Found an existing unziped model pack at: {}, the provided zip will not be touched.".format(model_pack_path))
         else:
-            print("Unziping the model pack and loading models.")
+            cls.log.info("Unziping the model pack and loading models.")
             shutil.unpack_archive(zip_path, extract_dir=model_pack_path)
 
         # Load the CDB
@@ -282,7 +284,7 @@ class CAT(object):
                                           config_dict=meta_cat_config_dict))
 
         cat = cls(cdb=cdb, config=cdb.config, vocab=vocab, meta_cats=meta_cats)
-        print(cat.get_model_card()) # Print the model card
+        cls.log.info(cat.get_model_card()) # Print the model card
         return cat
 
     def __call__(self, text: Optional[str], do_train: bool = False) -> Optional[Doc]:
@@ -539,6 +541,25 @@ class CAT(object):
 
         return fps, fns, tps, cui_prec, cui_rec, cui_f1, cui_counts, examples
 
+    def _init_ckpts(self, is_resumed, checkpoint):
+        if self.config.general['checkpoint']['steps'] is not None or checkpoint is not None:
+            checkpoint_config = CheckpointConfig(**self.config.general.get('checkpoint', {}))
+            checkpoint_manager = CheckpointManager('cat_train', checkpoint_config)
+            if is_resumed:
+                # TODO: probably remove is_resumed mark and always resume if a checkpoint is provided,
+                #but I'll leave it for now
+                checkpoint = checkpoint or checkpoint_manager.get_latest_checkpoint()
+                self.log.info(f"Resume training on the most recent checkpoint at {checkpoint.dir_path}...")
+                self.cdb = checkpoint.restore_latest_cdb()
+                self.cdb.config.merge_config(self.config.__dict__)
+                self.config = self.cdb.config
+                self._create_pipeline(self.config)
+            else:
+                checkpoint = checkpoint or checkpoint_manager.create_checkpoint()
+                self.log.info(f"Start new training and checkpoints will be saved at {checkpoint.dir_path}...")
+
+        return checkpoint
+
     def train(self,
               data_iterator: Iterable,
               nepochs: int = 1,
@@ -564,25 +585,14 @@ class CAT(object):
             is_resumed (bool):
                 If True resume the previous training; If False, start a fresh new training.
         """
-        checkpoint_config = CheckpointConfig(**self.config.linking.get('checkpoint', {}))
-        checkpoint_manager = CheckpointManager('cat_train', checkpoint_config)
-        if is_resumed:
-            checkpoint = checkpoint or checkpoint_manager.get_latest_checkpoint()
-            self.log.info(f"Resume training on the most recent checkpoint at {checkpoint.dir_path}...")
-            self.cdb = checkpoint.restore_latest_cdb()
-            self.cdb.config.merge_config(self.config.__dict__)
-            self.config = self.cdb.config
-            self._create_pipeline(self.config)
-        else:
-            checkpoint = checkpoint or checkpoint_manager.create_checkpoint()
-            if not fine_tune:
-                self.log.info("Removing old training data!")
-                self.cdb.reset_training()
-            self.log.info(f"Start new training and checkpoints will be saved at {checkpoint.dir_path}...")
+        if not fine_tune:
+            self.log.info("Removing old training data!")
+            self.cdb.reset_training()
+        checkpoint = self._init_ckpts(is_resumed, checkpoint)
 
-        latest_trained_step = checkpoint.count
+        latest_trained_step = checkpoint.count if checkpoint is not None else 0
         epochal_data_iterator = chain.from_iterable(repeat(data_iterator, nepochs))
-        for line in islice(epochal_data_iterator, checkpoint.count, None):
+        for line in islice(epochal_data_iterator, latest_trained_step, None):
             if line is not None and line:
                 # Convert to string
                 line = str(line).strip()
@@ -598,11 +608,8 @@ class CAT(object):
             latest_trained_step += 1
             if latest_trained_step % progress_print == 0:
                 self.log.info("DONE: %s", str(latest_trained_step))
-            if latest_trained_step % checkpoint.steps == 0:
+            if checkpoint is not None and checkpoint.steps is not None and latest_trained_step % checkpoint.steps == 0:
                 checkpoint.save(cdb=self.cdb, count=latest_trained_step)
-
-        if latest_trained_step % checkpoint.steps != 0:
-            checkpoint.save(cdb=self.cdb, count=latest_trained_step)
 
         self.config.linking['train'] = False
 
@@ -790,18 +797,7 @@ class CAT(object):
             examples (dict):
                 FP/FN examples of sentences for each CUI
         '''
-        checkpoint_config = CheckpointConfig(**self.config.linking.get('checkpoint', {}))
-        checkpoint_manager = CheckpointManager('cat_train_supervised', checkpoint_config)
-        if is_resumed:
-            checkpoint = checkpoint or checkpoint_manager.get_latest_checkpoint()
-            self.log.info(f"Resume training on the most recent checkpoint at {checkpoint.dir_path}...")
-            self.cdb = checkpoint.restore_latest_cdb()
-            self.cdb.config.merge_config(self.config.__dict__)
-            self.config = self.cdb.config
-            self._create_pipeline(self.config)
-        else:
-            checkpoint = checkpoint or checkpoint_manager.create_checkpoint()
-            self.log.info(f"Start new training and checkpoints will be saved at {checkpoint.dir_path}...")
+        checkpoint = self._init_ckpts(is_resumed, checkpoint)
 
         # Backup filters
         _filters = deepcopy(self.config.linking['filters'])
@@ -847,7 +843,7 @@ class CAT(object):
                         if ann.get('killed', False):
                             self.unlink_concept_name(ann['cui'], ann['value'])
 
-        latest_trained_step = checkpoint.count
+        latest_trained_step = checkpoint.count if checkpoint is not None else 0
         current_epoch, current_project, current_document = self._get_training_start(train_set, latest_trained_step)
 
         for epoch in trange(current_epoch, nepochs, initial=current_epoch, total=nepochs, desc='Epoch', leave=False):
@@ -900,7 +896,7 @@ class CAT(object):
                                                        do_add_concept=False)
 
                     latest_trained_step += 1
-                    if latest_trained_step % checkpoint.steps == 0:
+                    if checkpoint is not None and checkpoint.steps is not None and latest_trained_step % checkpoint.steps == 0:
                         checkpoint.save(self.cdb, latest_trained_step)
 
             if terminate_last and not never_terminate:
@@ -920,9 +916,6 @@ class CAT(object):
                                                                                use_overlaps=use_overlaps,
                                                                                use_groups=use_groups,
                                                                                extra_cui_filter=extra_cui_filter)
-
-        if latest_trained_step != checkpoint.count:
-            checkpoint.save(self.cdb, latest_trained_step)
 
         # Set the filters again
         self.config.linking['filters'] = _filters

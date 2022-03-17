@@ -132,7 +132,7 @@ class CATTests(unittest.TestCase):
                              checkpoint=checkpoint,
                              is_resumed=True)
         checkpoints = [f for f in os.listdir(ckpt_dir_path) if "checkpoint-" in f]
-        self.assertEqual(15, len(checkpoints))
+        self.assertEqual(13, len(checkpoints))
         self.assertTrue("checkpoint-%s-3" % ckpt_steps in checkpoints)
         self.assertTrue("checkpoint-%s-6" % ckpt_steps in checkpoints)
         self.assertTrue("checkpoint-%s-9" % ckpt_steps in checkpoints)
@@ -146,7 +146,6 @@ class CATTests(unittest.TestCase):
         self.assertTrue("checkpoint-%s-33" % ckpt_steps in checkpoints)
         self.assertTrue("checkpoint-%s-36" % ckpt_steps in checkpoints)
         self.assertTrue("checkpoint-%s-39" % ckpt_steps in checkpoints)
-        self.assertTrue("checkpoint-%s-40" % ckpt_steps in checkpoints)
 
     def test_resume_training_on_absent_checkpoints(self):
         ckpt_dir_path = tempfile.TemporaryDirectory().name
@@ -312,6 +311,10 @@ class CATTests(unittest.TestCase):
         contents = [f for f in os.listdir(os.path.join(save_dir_path.name, full_model_pack_name))]
         self.assertTrue("cdb.dat" in contents)
         self.assertTrue("vocab.dat" in contents)
+        self.assertTrue("model_card.json" in contents)
+        with open(os.path.join(save_dir_path.name, full_model_pack_name, "model_card.json")) as file:
+            model_card = json.load(file)
+        self.assertTrue("MedCAT Version" in model_card)
 
     def test_load_model_pack(self):
         save_dir_path = tempfile.TemporaryDirectory()

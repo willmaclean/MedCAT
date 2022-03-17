@@ -8,6 +8,7 @@ import numpy as np
 from typing import Dict, Set, Optional, List, Union, cast
 from functools import partial
 
+from medcat import __version__
 from medcat.utils.hasher import Hasher
 from medcat.utils.matutils import unitvec
 from medcat.utils.ml_utils import get_lr_linking
@@ -393,19 +394,21 @@ class CDB(object):
             await f.write(dill.dumps(to_save))
 
     @classmethod
-    def load(cls, path: str, config: Optional[Config] = None) -> "CDB":
+    def load(cls, path: str, config_dict: Optional[Dict] = None) -> "CDB":
         r''' Load and return a CDB. This allows partial loads in probably not the right way at all.
 
         Args:
             path (`str`):
                 Path to a `cdb.dat` from which to load data.
+            config_dict:
+                A dictionary that will be used to overwrite existing fields in the config of this CDB
         '''
         with open(path, 'rb') as f:
             # Again no idea
             data = dill.load(f)
-            if config is None:
-                config = cast(Config, Config.from_dict(data['config']))
-                cls._ensure_backward_compatibility(config)
+            cls._check_medcat_version(data['config'], cls.log)
+            config = cast(Config, Config.from_dict(data['config']))
+            cls._ensure_backward_compatibility(config)
 
             # Create an instance of the CDB (empty)
             cdb = cls(config=config)
@@ -414,6 +417,10 @@ class CDB(object):
             for k in cdb.__dict__:
                 if k in data['cdb']:
                     cdb.__dict__[k] = data['cdb'][k]
+
+            # Overwrite the config with new data
+            if config_dict is not None:
+                cdb.config.merge_config(config_dict)
 
         return cdb
 
@@ -660,6 +667,21 @@ class CDB(object):
         disabled_comps = config.general.get('spacy_disabled_components', [])
         if 'tagger' in disabled_comps and 'lemmatizer' not in disabled_comps:
             config.general['spacy_disabled_components'].append('lemmatizer')
+
+    @staticmethod
+    def _check_medcat_version(config_data: Dict, log: logging.Logger) -> None:
+        cdb_medcat_version = config_data.get('version', {}).get('medcat_version', 'unknown')
+        if __version__.split(".")[:1] != cdb_medcat_version.split(".")[:1]:
+            log.warning(
+                f"""You have MedCAT version '{__version__}' installed while the CDB was exported by MedCAT version '{cdb_medcat_version}',
+Please reinstall MedCAT or download the compatible model."""
+            )
+        elif __version__.split(".")[:2] != cdb_medcat_version.split(".")[:2]:
+            log.warning(
+                f"""You have MedCAT version '{__version__}' installed while the CDB was exported by MedCAT version '{cdb_medcat_version}',
+which may or may not work. If you experience any compatibility issues, please reinstall MedCAT
+or download the compatible model."""
+            )
 
     def get_hash(self):
         hasher = Hasher()
